@@ -1,0 +1,202 @@
+Test-Driven Development (TDD) Plan
+
+1. Introduction
+
+Your code integrates several services:
+
+Reddit API (for data collection)
+Kafka (for publishing and subscribing to messages)
+MongoDB (for data persistence)
+Salesforce (for CRM updates)
+Slack (for alerts)
+NLP model (Hugging Face sentiment analysis)
+Because these services are external dependencies, you’ll want to mock them in your tests to avoid making actual network calls whenever possible. TDD means writing your tests before implementing (or modifying) the production code. In practice, for an existing codebase, TDD can also be approached by creating or refining tests alongside refactoring code.
+
+2. Tools & Frameworks
+
+pytest: A popular Python testing framework.
+unittest.mock (or pytest-mock): For mocking external dependencies.
+mongomock or pymongo with a test database: For simulating MongoDB.
+responses or requests_mock: For mocking external HTTP calls (Reddit, Slack, Salesforce).
+Kafka testing: Tools like pytest-kafka or local test Kafka cluster with Docker.
+3. High-Level Test Categories
+
+Unit Tests
+Test functions in isolation (e.g., analyze_sentiment, classify_sentiment, save_to_mongo).
+Mock external dependencies (API calls, Kafka, Slack).
+Integration Tests
+Verify multiple components together (e.g., produce messages to Kafka, consume them, store in MongoDB).
+Use a local or Docker-based Kafka/Mongo instance if practical.
+End-to-End (E2E) Tests
+Run the entire pipeline from Reddit Producer to Sentiment Consumer, in a test environment.
+Usually requires more setup and environment mocking.
+Performance / Load Tests (Optional)
+Evaluate how the system behaves under large data loads, though often done after functional correctness is established.
+4. Test Strategy for Each File
+
+4.1. reddit_producer.py
+4.1.1. Unit Tests
+
+get_access_token()
+Scenario: Returns a valid token.
+Test: Mock requests.post to return a JSON with {"access_token": "test_token", "expires_in": 3600}.
+Assert: Function returns tuple ("test_token", 3600).
+get_headers(token)
+Scenario: Token is passed to function.
+Test: Provide a dummy token, e.g., "dummy_token".
+Assert: The returned dictionary contains the expected Authorization header with bearer dummy_token.
+is_bot(author)
+Scenarios:
+Author contains “bot” → returns True.
+Author doesn’t contain “bot” → returns False.
+Assert correctness for each scenario.
+fetch_new_posts(subreddit, headers, last_timestamp, collected_ids, max_posts=10)
+Mock: requests.get to simulate Reddit API response.
+Scenarios:
+Returns no new posts → function returns an empty list.
+Returns multiple new posts → function returns only up to max_posts and excludes bots.
+Assert:
+Correct number of posts is returned.
+Timestamps and IDs are respected (last_timestamp and collected_ids usage).
+save_to_mongo(post)
+Scenario: Insert a post into the mock MongoDB.
+Test: Use mongomock or a local test DB.
+Assert: The post is inserted with the correct fields.
+Delivery Report Callback
+Typically tested by ensuring it correctly logs/prints the status.
+4.1.2. Integration Tests
+
+Reddit → Kafka
+Start local Kafka (Docker or test cluster).
+Use fetch_new_posts (mocking the API) and produce messages to Kafka.
+Assert messages show up on the Kafka topic.
+MongoDB Insert
+After fetching posts, ensure they are inserted into a test MongoDB collection.
+Query MongoDB to verify stored data.
+4.2. sentiment_consumer.py
+4.2.1. Unit Tests
+
+analyze_sentiment(interaction_text)
+Mock the Hugging Face pipeline return value.
+Scenario: Input text → {"label": "POSITIVE", "score": 0.95}.
+Assert: The returned dictionary matches the mock.
+classify_sentiment(sentiment_result)
+Scenarios:
+{'label': 'POSITIVE', 'score': 0.95} → Expect “Low Risk” & 0.95.
+{'label': 'POSITIVE', 'score': 0.4} → Expect “Medium Risk” & 0.4.
+{'label': 'NEGATIVE', 'score': 0.8} → Expect “High Risk” & -0.8.
+Assert correct category & numerical score.
+fetch_additional_post_data(post_id)
+Mock: PRAW’s reddit.submission(id=…).
+Scenario: Returns submission.score = 10, submission.num_comments = 5.
+Assert: The function returns {'upvotes': 10, 'comments': 5}.
+fetch_user_karma(author_name)
+Mock: Redditor(reddit, name=...).
+Scenario: redditor.link_karma = 100, redditor.comment_karma = 50.
+Assert: Returns 150.
+save_sentiment_to_mongo(post, sentiment_category, numerical_score)
+Mock: fetch_additional_post_data and fetch_user_karma to avoid real Reddit calls.
+Assert: Data is inserted into sentiment_collection with correct structure.
+update_crm_with_sentiment(post, sentiment_category, numerical_score)
+Mock: Salesforce sf.query, sf.Contact.create, sf.Contact.update.
+Scenarios:
+Contact does not exist → Creates a new Contact.
+Contact exists → Updates the existing Contact.
+Assert correct operations are called with correct fields.
+post_comment(post_id, message)
+Mock: PRAW submission object.
+Assert: submission.reply is called with the message.
+trigger_real_time_intervention(post, sentiment_category, numerical_score)
+Mock: post_comment and send_slack_alert.
+Scenarios:
+High Risk → Apology comment and Slack alert.
+Very Positive (> 0.8) → Thank-you comment and Slack alert.
+Otherwise → No action.
+Assert each scenario calls or does not call the mocks accordingly.
+weekly_aggregated_interventions()
+Mock: sentiment_collection.aggregate return value and post_comment, send_slack_alert.
+Scenarios:
+Some users have negative posts → Apology comment posted on most recent negative post.
+Some users have positive posts → Thank-you comment posted on most positive post.
+Assert correct calls with the correct messages.
+export_to_csv()
+Mock: pandas.DataFrame.to_csv.
+Scenarios:
+sentiments collection has data → CSV file is generated.
+user_segments collection has data → CSV file is generated.
+Assert the CSV generation was called with correct parameters.
+4.2.2. Integration Tests
+
+Kafka → Consumer → MongoDB
+Produce a sample message to Kafka test topic.
+Consumer picks it up, processes sentiment, and inserts the result into MongoDB.
+Assert the document in MongoDB matches expected sentiment fields.
+Mock External Services
+Combine partial integration with Slack, Salesforce, or keep them mocked to avoid real API hits.
+Confirm the flow from Kafka message → final sentiment in sentiment_collection → SF update.
+Clustering
+After messages are processed, test the final clustering logic.
+Insert known test data into sentiment_collection, run the consumer exit logic (or the function that triggers clustering), and verify the user_segments results are correct.
+5. Example Test Outline
+
+Below is a simplified example using pytest for is_bot(author) and classify_sentiment(). For brevity, we show just a small snippet:
+
+# test_reddit_producer.py
+
+import pytest
+from reddit_producer import is_bot
+
+@pytest.mark.parametrize("author,expected", [
+    ("myBotUser", True),
+    ("regularUser", False),
+    ("HelperBOT", True),
+    ("USERNAME", False),
+])
+def test_is_bot(author, expected):
+    assert is_bot(author) == expected
+
+
+# test_sentiment_consumer.py
+
+import pytest
+from sentiment_consumer import classify_sentiment
+
+@pytest.mark.parametrize("input_sentiment,expected_category,expected_score_range", [
+    ({"label": "POSITIVE", "score": 0.95}, "Low Risk", (0.9, 1.0)),
+    ({"label": "POSITIVE", "score": 0.4}, "Medium Risk", (0.3, 0.5)),
+    ({"label": "NEGATIVE", "score": 0.8}, "High Risk", (-1.0, -0.7)),
+])
+def test_classify_sentiment(input_sentiment, expected_category, expected_score_range):
+    category, numerical_score = classify_sentiment(input_sentiment)
+    assert category == expected_category
+    assert expected_score_range[0] <= numerical_score <= expected_score_range[1]
+You would continue this pattern for each function, writing tests that fail first (no implementation or incomplete) and then implement or adjust the code until the tests pass.
+
+6. Running the Tests
+
+Install dependencies:
+pip install pytest requests_mock mongomock pytest-mock
+Run:
+pytest
+View coverage (optional):
+pip install pytest-cov
+pytest --cov=.
+7. Iterative TDD Cycle
+
+Write a test for a small piece of functionality (e.g., fetch_new_posts returning up to max_posts).
+Run the test → it fails because code is incomplete.
+Implement or fix the code to satisfy the test.
+Run tests → now it passes.
+Refactor if needed, ensuring all tests still pass.
+Repeat for the next functionality.
+By following this cycle, you ensure that you only write code that is backed by tests, leading to a robust and maintainable solution.
+
+Conclusion
+
+A TDD approach for your existing code involves:
+
+Creating test files (e.g., test_reddit_producer.py, test_sentiment_consumer.py, etc.).
+Writing failing tests first for each piece of functionality.
+Mocking external dependencies (Reddit, Slack, Salesforce, Kafka, MongoDB).
+Iterating with small changes until all tests pass.
+This ensures each function is thoroughly verified, and integration tests confirm that the entire pipeline (from Reddit to Slack / Salesforce) works correctly—without exposing or depending on real credentials in your test environment.
